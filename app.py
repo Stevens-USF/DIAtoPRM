@@ -8,10 +8,13 @@ the original script's input() prompts.
 
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from shiny import App, reactive, render, ui
 
 from prm_logic import OUTPUT_HEADER, PrmParams, run_prm
+from rt_calibration import apply_rt_calibration, fit_rt_calibration
 
 
 def read_ms_file(path: str) -> pd.DataFrame:
@@ -34,6 +37,20 @@ app_ui = ui.page_sidebar(
         ui.input_numeric("top_n", "Top N highest-intensity sequences", value=5),
         ui.input_checkbox("drop_m", "Drop sequences containing Methionine", value=False),
         ui.input_checkbox("split_genes", "Split multi-gene 'Genes' entries", value=False),
+        ui.accordion(
+            ui.accordion_panel(
+                "RT recalibration (optional)",
+                ui.input_checkbox("enable_recal", "Recalibrate MS file's RT onto a different column/gradient", value=False),
+                ui.input_file("hela_old_file", "HeLa report — historic column/gradient", accept=[".tsv", ".txt", ".parquet"]),
+                ui.input_file("hela_new_file", "HeLa report — current column/gradient", accept=[".tsv", ".txt", ".parquet"]),
+                ui.input_select(
+                    "recal_degree", "Fit type",
+                    choices={"1": "Linear (uniform shift/stretch)", "2": "Quadratic (also captures gradient-end compression)"},
+                    selected="1",
+                ),
+            ),
+            open=False,
+        ),
         ui.input_action_button("run", "Run", class_="btn-primary"),
         width=380,
     ),
@@ -44,6 +61,11 @@ app_ui = ui.page_sidebar(
             ui.output_data_frame("results_table"),
         ),
         ui.nav_panel("Log", ui.output_text_verbatim("log_output")),
+        ui.nav_panel(
+            "RT Calibration",
+            ui.output_text_verbatim("calibration_summary"),
+            ui.output_plot("calibration_plot"),
+        ),
     ),
     title="DIAtoPRM — PRM Transition List Generator",
 )
@@ -51,6 +73,7 @@ app_ui = ui.page_sidebar(
 
 def server(input, output, session):
     result = reactive.Value(None)
+    calibration = reactive.Value(None)
 
     @reactive.effect
     @reactive.event(input.run)
@@ -63,6 +86,22 @@ def server(input, output, session):
         try:
             df_ipa = pd.read_csv(ipa_info[0]["datapath"], delimiter="\t", skiprows=2)
             df_ms = read_ms_file(ms_info[0]["datapath"])
+
+            cal = None
+            if input.enable_recal():
+                hela_old_info = input.hela_old_file()
+                hela_new_info = input.hela_new_file()
+                if not hela_old_info or not hela_new_info:
+                    ui.notification_show(
+                        "RT recalibration is enabled — please upload both HeLa reports.", type="error"
+                    )
+                    return
+                df_hela_old = read_ms_file(hela_old_info[0]["datapath"])
+                df_hela_new = read_ms_file(hela_new_info[0]["datapath"])
+                cal = fit_rt_calibration(df_hela_old, df_hela_new, degree=int(input.recal_degree()))
+                df_ms = apply_rt_calibration(df_ms, cal)
+            calibration.set(cal)
+
             params = PrmParams(
                 filetype_ms=input.filetype_ms(),
                 split_genes=input.split_genes(),
@@ -74,6 +113,8 @@ def server(input, output, session):
                 drop_sequence_aa_m=input.drop_m(),
             )
             res = run_prm(df_ipa, df_ms, params)
+            if cal is not None:
+                res.log.insert(0, f"RT recalibration applied: {cal.describe()} (R^2={cal.r_squared:.4f}, n={cal.n_points} matched HeLa peptides)\n")
             result.set(res)
             ui.notification_show(f"Done — {len(res.output_df)} transitions.", type="message")
         except Exception as e:
@@ -101,6 +142,38 @@ def server(input, output, session):
         df = res.output_df.copy()
         df.columns = OUTPUT_HEADER
         yield df.to_csv(index=False)
+
+    @render.text
+    def calibration_summary():
+        cal = calibration.get()
+        if cal is None:
+            return "RT recalibration was not used for this run."
+        return (
+            f"Fit: {cal.describe()}\n"
+            f"R^2: {cal.r_squared:.4f}\n"
+            f"Matched HeLa peptides: {cal.n_points}\n\n"
+            "Low R^2, or a scatter that visibly bows away from the fit line below, means the "
+            "current fit type isn't capturing the true old-column-to-new-column relationship "
+            "well — try the other fit type (Linear vs Quadratic) in the sidebar."
+        )
+
+    @render.plot
+    def calibration_plot():
+        cal = calibration.get()
+        fig, ax = plt.subplots(figsize=(6, 5))
+        if cal is None:
+            ax.text(0.5, 0.5, "Run with RT recalibration enabled to see the fit.", ha="center", va="center")
+            ax.set_axis_off()
+            return fig
+        ax.scatter(cal.old_rt, cal.new_rt, s=8, alpha=0.4, label="matched HeLa peptides")
+        x_line = np.linspace(cal.old_rt.min(), cal.old_rt.max(), 200)
+        ax.plot(x_line, cal.predict(x_line), color="red", label=f"fit (R^2={cal.r_squared:.4f})")
+        ax.set_xlabel("Old column/gradient RT (min)")
+        ax.set_ylabel("New column/gradient RT (min)")
+        ax.set_title("RT recalibration fit")
+        ax.legend()
+        fig.tight_layout()
+        return fig
 
 
 app = App(app_ui, server)
