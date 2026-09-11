@@ -51,8 +51,44 @@ def adjust_unimod(modified_sequence: str) -> float:
     return sum(UNIMOD_MASSES[m] for m in mods)
 
 
+def cleavage_positions(sequence: str) -> list[int]:
+    """0-indexed positions in `sequence` where trypsin actually cleaves: immediately
+    after a K or R, except when followed by Proline (trypsin does not cut K/R-P)."""
+    return [
+        idx + 1
+        for idx in range(len(sequence) - 1)
+        if sequence[idx] in ("K", "R") and sequence[idx + 1] != "P"
+    ]
+
+
 def number_kr(sequence: str) -> int:
-    return sequence.count("R") + sequence.count("K")
+    """Count of trypsin-relevant K/R residues: internal cleavage sites (K/R not
+    followed by Proline) plus the C-terminal residue if it is K/R (the expected
+    tryptic terminus). A fully-digested peptide with no missed cleavage scores 1;
+    an internal K/R-P motif is correctly excluded since trypsin doesn't cut there."""
+    count = len(cleavage_positions(sequence))
+    if sequence and sequence[-1] in ("K", "R"):
+        count += 1
+    return count
+
+
+def is_cleavage_subfragment(seq_i: str, seq_j: str) -> bool:
+    """True if seq_j is the peptide obtained by cutting seq_i at real trypsin sites --
+    i.e. seq_j occurs in seq_i bounded on each side by either the start/end of seq_i or
+    a genuine (non-K/R-P) cleavage boundary. Plain substring containment isn't enough:
+    two biologically unrelated peptides can share a substring by coincidence."""
+    if not seq_j or seq_j not in seq_i:
+        return False
+    boundaries = set(cleavage_positions(seq_i))
+    start = 0
+    while True:
+        start = seq_i.find(seq_j, start)
+        if start == -1:
+            return False
+        end = start + len(seq_j)
+        if (start == 0 or start in boundaries) and (end == len(seq_i) or end in boundaries):
+            return True
+        start += 1
 
 
 @dataclass
@@ -174,7 +210,11 @@ def run_prm(df_ipa: pd.DataFrame, df_ms: pd.DataFrame, params: PrmParams) -> Prm
                     if i == j:
                         continue
                     seq_i, seq_j = grouped.at[i, "Stripped.Sequence"], grouped.at[j, "Stripped.Sequence"]
-                    if seq_j in seq_i and seq_i != seq_j and len(seq_i) - len(seq_j) > params.min_fragment_length:
+                    if (
+                        seq_i != seq_j
+                        and len(seq_i) - len(seq_j) > params.min_fragment_length
+                        and is_cleavage_subfragment(seq_i, seq_j)
+                    ):
                         if grouped.at[i, "Intensity_mean"] < params.intensity_digestion_tolerance * grouped.at[j, "Intensity_mean"]:
                             dropped.add(i)
                             say(
