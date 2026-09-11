@@ -1,0 +1,15 @@
+[project]
+name = "diatoprm"
+version = "0.1.0"
+description = "Shiny for Python app: generates PRM transition lists from DIA-NN/timsDIA-NN search output + an IPA gene list."
+readme = "README.md"
+authors = [
+    { name = "Stan Stevens", email = "stan.stevens75@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.3",
+    "pandas>=3.0.5",
+    "pyarrow>=25.0.1",
+    "shiny>=1.7.0",
+]
