@@ -143,24 +143,26 @@ def run_prm(df_ipa: pd.DataFrame, df_ms: pd.DataFrame, params: PrmParams) -> Prm
         grouped["CE"] = ""
         grouped["External_ID"] = ""
 
-        # drop weak charge-state duplicates
-        say("Examining sequences with different charges")
-        dropped: set[int] = set()
-        for i in grouped.index:
-            for j in grouped.index:
-                if grouped.at[j, "Stripped.Sequence"] == grouped.at[i, "Stripped.Sequence"] and j != i:
-                    intensity_sum = grouped.at[i, "Intensity_mean"] + grouped.at[j, "Intensity_mean"]
-                    intensity_j_rel = grouped.at[j, "Intensity_mean"] / intensity_sum
-                    if intensity_j_rel < params.intensity_charge_state_tolerance:
-                        say(
-                            g_ipa, ": Removing sequence", grouped.at[j, "Stripped.Sequence"],
-                            "with charge", grouped.at[j, "Precursor.Charge"], "as its Intensity=",
-                            grouped.at[j, "Intensity_mean"], "is less than",
-                            params.intensity_charge_state_tolerance, "of total Intensity of", intensity_sum,
-                        )
-                        dropped.add(j)
-        grouped = grouped.drop(labels=list(dropped))
-        say("Total sequences dropped =", len(dropped))
+        # drop minor charge states of a peptide whose intensity is split unevenly across
+        # its charge states, i.e. keep the charge state(s) that carry most of the signal
+        # (better for quant reproducibility). Grouped by Modified.Sequence, not
+        # Stripped.Sequence, so distinct modification states of the same stripped
+        # sequence are never compared against each other as if they were charge variants.
+        say("Examining charge-state intensity distribution")
+        charge_group_total = grouped.groupby("Modified.Sequence")["Intensity_mean"].transform("sum")
+        charge_state_count = grouped.groupby("Modified.Sequence")["Precursor.Charge"].transform("nunique")
+        charge_fraction = grouped["Intensity_mean"] / charge_group_total
+        drop_mask = (charge_state_count > 1) & (charge_fraction < params.intensity_charge_state_tolerance)
+        for idx in grouped.index[drop_mask]:
+            say(
+                g_ipa, ": Removing sequence", grouped.at[idx, "Stripped.Sequence"],
+                "with charge", grouped.at[idx, "Precursor.Charge"], "as its Intensity=",
+                grouped.at[idx, "Intensity_mean"], "is only", round(charge_fraction.at[idx], 4),
+                "of its total intensity across charge states, below tolerance",
+                params.intensity_charge_state_tolerance,
+            )
+        grouped = grouped.drop(index=grouped.index[drop_mask])
+        say("Total sequences dropped =", int(drop_mask.sum()))
 
         # drop incompletely-digested fragments
         say("Examining incomplete digestion")
